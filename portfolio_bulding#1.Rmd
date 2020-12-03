@@ -1,0 +1,198 @@
+---
+title: "Xbox games on ebay auction"
+author: "Ahmed ALRashid"
+date: "11/3/2020"
+output: html_document
+---
+#Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(recipes)
+library(rsample)
+library(class)
+```
+
+#Reading the data
+```{r}
+vg7auction <- read.csv("Xbox 7-day auctions.csv")
+```
+
+#Deleting missing values
+```{r}
+vg7auction <- na.omit(vg7auction)
+```
+
+#spliting the data
+```{r}
+set.seed(123)  
+split  <- rsample::initial_split(vg7auction, prop = 0.7, 
+                                 strata = "bid")
+train_v  <- rsample::training(split)
+test_v   <- rsample::testing(split)
+```
+
+
+1. Assess the distribution of the target / response variable.
+```{r}
+
+ hist(vg7auction$bid, breaks=10)
+
+```
+
+Is the response skewed?
+Yes
+
+Does applying a transformation normalize the distribution?
+No
+```{r}
+
+transformed_response <- log(train_v$bid)
+
+ hist(transformed_response, breaks=10)
+ 
+
+```
+
+
+2. Assess the dataset for missingness.
+How many observations have missing values?
+11
+```{r}
+sum(is.na(vg7auction))
+```
+
+Plot the missing values. Does there appear to be any patterns to the missing values?
+```{r}
+vg7auction %>%
+  is.na() %>%
+  reshape2::melt() %>%
+  ggplot(aes(Var2, Var1, fill=value)) + 
+    geom_raster() + 
+    coord_flip() +
+    scale_y_continuous(NULL, expand = c(0, 0)) +
+    scale_fill_grey(name = "", 
+                    labels = c("Present", 
+                               "Missing")) +
+    xlab("Observation") +
+    theme(axis.text.y  = element_text(size = 4))
+```
+
+How do you think the different imputation approaches would impact modeling results?
+
+
+3. Assess the variance across the features.
+Do any features have zero variance?
+No
+Do any features have near-zero variance?
+No
+```{r}
+
+caret::nearZeroVar(train_v, saveMetrics = TRUE) %>% 
+  tibble::rownames_to_column()
+
+```
+
+4. Assess the numeric features.
+Do some features have significant skewness?
+Yes
+Do features have a wide range of values that would benefit from standardization?
+
+```{r}
+
+hist(vg7auction$bidtime, breaks=10)
+
+hist(vg7auction$bidderrate, breaks=10)
+
+hist(vg7auction$openbid, breaks=10)
+
+hist(vg7auction$price, breaks=10)
+
+
+```
+
+
+
+5. Assess the categorical features.
+Are categorical levels equally spread out across the features or is “lumping” occurring?
+its lumping mostly in other.
+```{r}
+
+lumping <- recipe(bid ~ ., data = train_v) %>%
+  step_other(bidder, threshold = 0.01, 
+             other = "other") %>%
+  step_other(auctionid, threshold = 0.1, 
+             other = ">0")
+
+
+apply_2_training <- prep(lumping, training = train_v) %>%
+  bake(train_v)
+
+
+count(apply_2_training, bidder) %>% arrange(n)
+
+```
+
+```{r}
+count(apply_2_training, auctionid) %>% arrange(n)
+```
+
+Which values do you think should be one-hot or dummy encoded versus label encoded? Why?
+
+
+6. Execute a basic feature engineering process.
+
+First, apply a KNN model to your data without pre-applying feature engineering processes.
+```{r}
+
+cv <- trainControl(
+  method = "repeatedcv", 
+  number = 10, 
+  repeats = 5
+)
+
+# Create grid of hyperparameter values
+hyper_grid <- expand.grid(k = seq(2, 25, by = 1))
+
+# Tune a knn model using grid search
+knn_fit <- train(
+  bid ~ ., 
+  data = train_v, 
+  method = "knn", 
+  trControl = cv, 
+  tuneGrid = hyper_grid,
+  metric = "RMSE"
+)
+
+```
+
+
+Create and a apply a blueprint of feature engineering processes that you think will help your model improve.
+
+```{r}
+
+blueprint <- recipe(bid ~ ., data = train_v) %>%
+  step_nzv(all_nominal())  %>%
+  step_center(all_numeric(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes()) %>%
+  step_pca(all_numeric(), -all_outcomes())
+  
+blueprint
+
+```
+
+```{r}
+prepare <- prep(blueprint, training = train_v)
+prepare
+```
+
+Now reapply the KNN model to your data that has been feature engineered.
+Did your model performance improve?
+
+
+
+

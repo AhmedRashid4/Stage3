@@ -1,0 +1,314 @@
+---
+title: 'Portfolio building #2'
+author: "Ahmed ALRashid"
+date: "12/3/2020"
+output: html_document
+---
+
+
+#Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(recipes)
+library(rsample)
+library(class)
+library(vip)
+library(glmnet)
+```
+
+
+#Reading the data
+```{r}
+vg7auction <- read.csv("Xbox 7-day auctions.csv")
+```
+
+#Deleting missing values
+```{r}
+vg7auction <- na.omit(vg7auction)
+```
+
+#spliting the data
+```{r}
+set.seed(123)  
+split  <- rsample::initial_split(vg7auction, prop = 0.7, 
+                                 strata = "bid")
+train_v  <- rsample::training(split)
+test_v   <- rsample::testing(split)
+```
+
+#data prep
+```{r}
+
+# Create training  feature matrices
+# we use model.matrix(...)[, -1] to discard the intercept
+X <- model.matrix(bid ~ ., train_v)[, -1]
+
+# transform y with log transformation
+Y <- log(train_v$bid)
+```
+
+
+
+1. Depending on the type of response variable, apply a linear or logistic regression model.
+First, apply the model to your data without pre-applying feature engineering processes.
+```{r}
+
+model1 <- lm(bid ~ price, data = train_v)
+summary(model1)
+# RMSE
+sigma(model1)
+# MSE
+sigma(model1)^2
+confint(model1, level = 0.95)
+
+```
+
+
+Create and a apply a blueprint of feature engineering processes that you think will help your model improve.
+
+```{r}
+
+blueprint <- recipe(bid ~ ., data = train_v) %>%
+  step_nzv(all_nominal())  %>%
+  step_center(all_numeric(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes()) %>%
+  step_pca(all_numeric(), -all_outcomes())
+  
+blueprint
+
+```
+
+```{r}
+prepare <- prep(blueprint, training = train_v)
+prepare
+```
+
+
+Now reapply the model to your data that has been feature engineered.
+Did your model performance improve?
+No
+```{r}
+
+model1 <- lm(bid ~ price, data = train_v)
+summary(model1)
+# RMSE
+sigma(model1)
+# MSE
+sigma(model1)^2
+confint(model1, level = 0.95)
+
+```
+
+
+2. Apply a principal component regression model.
+
+```{r}
+
+set.seed(123)
+cv_model_pcr <- train(
+  price ~ ., 
+  data = train_v, 
+  method = "pcr",
+  trControl = trainControl(method = "cv", number = 10),
+  preProcess = c("zv", "center", "scale"),
+  tuneLength = 100
+  )
+
+# model with lowest RMSE
+cv_model_pcr$bestTune
+
+```
+
+Perform a grid search over several components.
+Identify and explain the performance of the optimal model.
+
+
+
+3.Apply a partial least squares regression model.
+
+```{r}
+
+# perform 10-fold cross validation on a PLS model tuning the 
+# number of principal components to use as predictors from 1-30
+set.seed(123)
+cv_model_pls <- train(
+  bid ~ ., 
+  data = train_v, 
+  method = "pls",
+  trControl = trainControl(method = "cv", number = 10),
+  preProcess = c("zv", "center", "scale"),
+  tuneLength = 30
+)
+
+# model with lowest RMSE
+cv_model_pls$bestTune
+
+```
+
+
+
+Perform a grid search over several components.
+```{r}
+
+# for reproducibility
+set.seed(123)
+
+# grid search across 
+cv_glmnet <- train(
+  x = X,
+  y = Y,
+  method = "glmnet",
+  preProc = c("zv", "center", "scale"),
+  trControl = trainControl(method = "cv", number = 10),
+  tuneLength = 10
+)
+
+# model with lowest RMSE
+cv_glmnet$bestTune
+
+```
+
+Identify and explain the performance of the optimal model.
+
+
+
+4. Apply a regularized regression model.
+
+Ridge:
+```{r}
+ridge <- glmnet(
+  x = X,
+  y = Y,
+  alpha = 0
+)
+
+plot(ridge, xvar = "lambda")
+```
+
+Lasso:
+```{r}
+lasso <- glmnet(
+  x = X,
+  y = Y,
+  alpha = 1
+)
+
+plot(lasso, xvar = "lambda")
+```
+
+Ridge CV model:
+```{r}
+ridge <- cv.glmnet(
+  x = X,
+  y = Y,
+  alpha = 0
+)
+
+plot(ridge)
+```
+
+Lasso CV model:
+```{r}
+lasso <- cv.glmnet(
+  x = X,
+  y = Y,
+  alpha = 1
+)
+
+plot(lasso)
+```
+
+Ridge model results: 
+```{r}
+# Ridge model - minimum MSE
+min(ridge$cvm)
+
+# Ridge model - lambda for this min MSE
+ridge$lambda.min 
+
+# Ridge model w/1-SE rule
+ridge$cvm[ridge$lambda == ridge$lambda.1se]
+
+# Ridge model w/1-SE rule -- No. of coef | 1-SE MSE
+ridge$nzero[ridge$lambda == ridge$lambda.1se]
+```
+
+Lasso model results: 
+```{r}
+# Lasso model - minimum MSE
+min(lasso$cvm)       
+
+# Lasso model - lambda for this min MSE
+lasso$lambda.min 
+
+# Lasso model - w/1-SE rule
+lasso$cvm[lasso$lambda == lasso$lambda.1se]
+
+# Lasso model w/1-SE rule -- No. of coef | 1-SE MSE
+lasso$nzero[lasso$lambda == lasso$lambda.1se]
+```
+
+
+
+
+Perform a grid search across alpha parameter values ranging between 0–1.
+
+```{r cv-glmnet}
+# tuning grid
+hyper_grid <- expand.grid(
+  alpha = seq(0, 1, by = .25),
+  lambda = c(0.1, 10, 100, 1000, 10000)
+)
+
+# perform resampling
+set.seed(123)
+cv_glmnet <- train(
+  x = X,
+  y = Y,
+  method = "glmnet",
+  preProc = c("zv", "center", "scale"),
+  trControl = trainControl(method = "cv", number = 10),
+  tuneLength = 10
+)
+
+# best model
+cv_glmnet$results %>%
+  filter(
+    alpha == cv_glmnet$bestTune$alpha,
+    lambda == cv_glmnet$bestTune$lambda
+  )
+```
+
+```{r cv-glmnet-plot, fig.height=5}
+# plot results
+plot(cv_glmnet)
+```
+
+
+What is the optimal alpha and lambda values?
+What is the MSE and RMSE for this optimal model?
+How does it compare to your previous models?
+
+```{r}
+# predict sales price on training data
+pred <- predict(cv_glmnet, X)
+
+# compute RMSE of transformed predicted
+RMSE(exp(pred), exp(Y))
+```
+
+
+5. Pick the best performing model from above.
+Identify the most influential features for this model.
+
+# Feature importance
+```{r}
+vip(cv_glmnet, num_features = 20, geom = "point")
+```
+Plot the top 10 most influential features.
+Do these features have positive or negative impacts on your response variable?
