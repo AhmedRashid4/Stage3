@@ -1,0 +1,201 @@
+---
+title: 'Portfolio Builder #3'
+author: "Ahmed ALRashid"
+date: "12/3/2020"
+output: html_document
+---
+
+#Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(recipes)
+library(rsample)
+library(class)
+library(earth)
+library(pdp)
+library(ranger) 
+library(h2o)      
+```
+
+#Reading the data
+```{r}
+vg7auction <- read.csv("Xbox 7-day auctions.csv")
+```
+
+#Deleting missing values
+```{r}
+vg7auction <- na.omit(vg7auction)
+```
+
+#spliting the data
+```{r}
+set.seed(123)  
+split  <- rsample::initial_split(vg7auction, prop = 0.7, 
+                                 strata = "bid")
+train_v  <- rsample::training(split)
+test_v   <- rsample::testing(split)
+```
+
+```{r earth-tuning-params}
+caret::getModelInfo("earth")$earth$parameters
+```
+
+1. Apply a MARS model with all features.
+```{r}
+mars_t <- earth(
+  bid ~ .,  
+  data = train_v   
+)
+
+# Print model summary
+print(mars_t)
+
+```
+
+How does the model performance compare to your previous models?
+About the same
+
+How many of the features are influential? Which 10 features are considered most influential?
+```{r}
+vip(cv_glmnet, num_features = 10, geom = "point")
+```
+Does your model include hinge functions? If so, explain their coefficient and plot their impact on the predicted response variable.
+Does your model include interactions? If so, pick the interaction effect that is most influential and explain the coefficient.
+
+```{r}
+
+# tuning grid
+hyper_grid <- expand.grid(
+  nprune = seq(2, 50, length.out = 10) %>% floor(),
+  degree = 1:3
+)
+
+# perform resampling
+set.seed(123)
+cv_train_v <- train(
+  bid ~ ., 
+  data = train_v, 
+  trControl = trainControl(method = "cv", number = 10),
+  method = "earth", #<<
+  tuneGrid = hyper_grid,
+  metric = "RMSE"
+  )
+
+# best model
+cv_train_v$results %>%
+  filter(
+    nprune == cv_train_v$bestTune$nprune,
+    degree == cv_train_v$bestTune$degree
+    )
+
+
+```
+
+2. Apply a random forest model.
+First, apply a default random forest model.
+```{r}
+
+# number of features
+n_features <- length(setdiff(names(train_v), "bid"))
+
+# train a default random forest model
+train_v_rf1 <- ranger(
+  bid ~ ., 
+  data = train_v,
+  mtry = floor(n_features / 3),
+  respect.unordered.factors = "order",
+  seed = 123
+)
+
+# get OOB RMSE
+(default_rmse <- sqrt(train_v_rf1$prediction.error))
+
+```
+
+Now apply a a full cartesian grid search across various values of mtry
+, tree complexity & sampling scheme.
+```{r}
+
+# create hyperparameter grid
+hyper_grid <- expand.grid(
+  mtry = floor(n_features * c(.05, .15, .25, .333, .4)),
+  min.node.size = c(1, 3, 5, 10), 
+  replace = c(TRUE, FALSE),                               
+  sample.fraction = c(.5, .63, .8),                       
+  rmse = NA                                               
+)
+
+# execute full cartesian grid search
+for(i in seq_len(nrow(hyper_grid))) {
+  # fit model for ith hyperparameter combination
+  fit <- ranger(
+    formula         = bid ~ ., 
+    data            = train_v, 
+    num.trees       = n_features * 10,
+    mtry            = hyper_grid$mtry[i],
+    min.node.size   = hyper_grid$min.node.size[i],
+    replace         = hyper_grid$replace[i],
+    sample.fraction = hyper_grid$sample.fraction[i],
+    verbose         = FALSE,
+    seed            = 123,
+    respect.unordered.factors = 'order',
+  )
+  # export OOB error 
+  hyper_grid$rmse[i] <- sqrt(fit$prediction.error)
+}
+
+# assess top 10 models
+hyper_grid %>%
+  arrange(rmse) %>%
+  mutate(perc_gain = (default_rmse - rmse) / default_rmse * 100) %>%
+  head(10)
+
+```
+
+
+Now run a random grid search across the same hyperparameter grid but restrict the time or number of models to run to 50% of the models ran in the full cartesian.
+```{r}
+
+h2o.no_progress()
+h2o.init(max_mem_size = "5g")
+
+```
+```{r}
+
+# convert training data to h2o object
+train_h2o <- as.h2o(train_v)
+
+# set the response column to Sale_Price
+response <- "bid"
+
+# set the predictor names
+predictors <- setdiff(colnames(train_v), response)
+
+```
+
+```{r}
+h2o_rf1 <- h2o.randomForest(
+    x = predictors, 
+    y = response,
+    training_frame = train_h2o, 
+    ntrees = n_features * 10,
+    seed = 123
+)
+
+h2o_rf1
+```
+
+
+3. Pick the best performing model from above.
+Identify the most influential features for this model.
+Plot the top 10 most influential features.
+```{r}
+vip(cv_glmnet, num_features = 10, geom = "point")
+```
+Do these features have positive or negative impacts on your response variable?
+Create partial dependence plots for these features. Explain the relationship between the feature and the predicted values.
