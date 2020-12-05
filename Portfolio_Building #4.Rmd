@@ -1,0 +1,464 @@
+---
+title: 'Portfolio Building #4'
+author: "Ahmed ALRashid"
+date: "12/4/2020"
+output: html_document
+---
+
+#Loading Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(recipes)
+library(rsample)
+library(class)
+library(earth)
+library(pdp)
+library(ranger) 
+library(h2o)
+library(gbm)
+library(xgboost)
+library(vip)
+```
+
+#Reading the data
+```{r}
+vg7auction <- read.csv("Xbox 7-day auctions.csv")
+```
+
+#Deleting missing values
+```{r}
+vg7auction <- na.omit(vg7auction)
+```
+
+#spliting the data
+```{r}
+set.seed(123)  
+split  <- rsample::initial_split(vg7auction, prop = 0.7, 
+                                 strata = "bid")
+train_v  <- rsample::training(split)
+test_v   <- rsample::testing(split)
+```
+
+
+```{r}
+
+train_v$bidder <- as.factor(train_v$bidder)
+test_v$bidder <- as.factor(test_v$bidder)
+
+```
+
+
+1. Apply a basic GBM model with the same features you used in the random forest module.
+```{r}
+
+set.seed(123)
+train_v_gbm <- gbm(
+  formula = bid ~ .,
+  data = train_v,
+  distribution = "gaussian", # or bernoulli, multinomial, etc. 
+  n.trees = 3000, 
+  shrinkage = 0.001, 
+  interaction.depth = 1, 
+  n.minobsinnode = 10, 
+  cv.folds = 5 
+  )  
+
+# find index for n trees with minimum CV error
+min_MSE <- which.min(train_v_gbm$cv.error)
+
+# get MSE and compute RMSE
+sqrt(train_v_gbm$cv.error[min_MSE])
+
+```
+
+
+Apply the default hyperparameter settings with a learning rate set to 0.10. How does model performance compare to the random forest module?
+```{r}
+
+set.seed(123)
+train_v_gbm <- gbm(
+  formula = bid ~ .,
+  data = train_v,
+  distribution = "gaussian", # or bernoulli, multinomial, etc. 
+  n.trees = 3000, 
+  shrinkage = 0.10, 
+  interaction.depth = 1, 
+  n.minobsinnode = 10, 
+  cv.folds = 5 
+  )  
+
+# find index for n trees with minimum CV error
+min_MSE <- which.min(train_v_gbm$cv.error)
+
+# get MSE and compute RMSE
+sqrt(train_v_gbm$cv.error[min_MSE])
+
+```
+How many trees were applied? Was this enough to stabilize the loss function or do you need to add more?
+3000 trees were applied. since the data isn't big, I thought it would be a good guess.
+
+Tune the hyperparameters using the suggested tuning strategy for basic GBMs. Did your model performance improve?
+No
+```{r}
+
+set.seed(123)
+train_v_gbm <- gbm(
+  formula = bid ~ .,
+  data = train_v,
+  distribution = "gaussian", # or bernoulli, multinomial, etc. 
+  n.trees = 3500, 
+  shrinkage = 0.001, 
+  interaction.depth = 3, 
+  n.minobsinnode = 10, 
+  cv.folds = 10 
+  )  
+
+# find index for n trees with minimum CV error
+min_MSE <- which.min(train_v_gbm$cv.error)
+
+# get MSE and compute RMSE
+sqrt(train_v_gbm$cv.error[min_MSE])
+
+```
+2. Apply a stochastic GBM model. Tune the hyperparameters using the suggested tuning strategy for stochastic GBMs. Did your model performance improve?
+No
+```{r}
+bag_frac <- c(.5, .65, .8) #<<
+
+for(i in bag_frac) {
+  set.seed(123)
+  m <- gbm(
+    formula = bid ~ .,
+    data = train_v,
+    distribution = "gaussian",
+    n.trees = 6000, 
+    shrinkage = 0.01, 
+    interaction.depth = 7, 
+    n.minobsinnode = 5,
+    bag.fraction = i, #<<
+    cv.folds = 10 
+    )
+  # compute RMSE
+  print(sqrt(min(m$cv.error)))
+}
+```
+
+3. Apply an XGBoost model. Tune the hyperparameters using the suggested tuning strategy for XGBoost models.
+```{r}
+xgb_prep <- recipe(bid ~ ., data = train_v) %>%
+  step_other(all_nominal(), threshold = .005) %>%
+  step_integer(all_nominal()) %>%
+  prep(training = train_v, retain = TRUE) %>%
+  juice()
+
+X <- as.matrix(xgb_prep[setdiff(names(xgb_prep), "bid")])
+Y <- xgb_prep$bid
+```
+
+```{r}
+set.seed(123)
+train_v_xgb <- xgb.cv(
+  data = X,
+  label = Y,
+  nrounds = 5000,
+  objective = "reg:linear",
+  early_stopping_rounds = 50, 
+  nfold = 10,
+  verbose = 0,
+  )  
+
+train_v_xgb$evaluation_log %>% tail()
+
+```
+
+```{r}
+
+set.seed(123)
+train_v_xgb <- xgb.cv(
+  data = X,
+  label = Y,
+  nrounds = 6000,
+  objective = "reg:linear",
+  early_stopping_rounds = 50, 
+  nfold = 10,
+  verbose = 0,
+  params = list(eta = .05) #<<
+  )  
+
+train_v_xgb$evaluation_log %>% tail()
+
+```
+
+```{r}
+
+# grid
+hyper_grid <- expand.grid(
+  eta = .05,
+  max_depth = c(1, 3, 5, 7, 9), #<<
+  min_child_weight = c(1, 3, 5, 7, 9), #<<
+  rmse = 0 # a place to dump results
+  )
+
+# grid search
+for(i in seq_len(nrow(hyper_grid))) {
+  set.seed(123)
+  m <- xgb.cv(
+    data = X,
+    label = Y,
+    nrounds = 6000,
+    objective = "reg:linear",
+    early_stopping_rounds = 50, 
+    nfold = 10,
+    verbose = 0,
+    params = list( #<<
+      eta = hyper_grid$eta[i], #<<
+      max_depth = hyper_grid$max_depth[i], #<<
+      min_child_weight = hyper_grid$min_child_weight[i] #<<
+    ) #<<
+  )
+  hyper_grid$rmse[i] <- min(m$evaluation_log$test_rmse_mean)
+}
+
+arrange(hyper_grid, rmse)
+
+```
+
+```{r}
+
+# grid
+hyper_grid <- expand.grid(
+  eta = .05,
+  max_depth = 3, 
+  min_child_weight = 3,
+  subsample = c(.5, .65, .8, 1), #<<
+  colsample_bytree = c(.5, .65, .8, 1), #<<
+  rmse = 0 # a place to dump results
+  )
+
+# grid search
+for(i in seq_len(nrow(hyper_grid))) {
+  set.seed(123)
+  m <- xgb.cv(
+    data = X,
+    label = Y,
+    nrounds = 6000,
+    objective = "reg:linear",
+    early_stopping_rounds = 50, 
+    nfold = 10,
+    verbose = 0,
+    params = list( #<<
+      eta = hyper_grid$eta[i],
+      max_depth = hyper_grid$max_depth[i],
+      min_child_weight = hyper_grid$min_child_weight[i],
+      subsample = hyper_grid$subsample[i], #<<
+      colsample_bytree = hyper_grid$colsample_bytree[i] #<<
+    ) #<<
+  )
+  hyper_grid$rmse[i] <- min(m$evaluation_log$test_rmse_mean)
+}
+
+arrange(hyper_grid, rmse)
+
+```
+
+```{r}
+
+hyper_grid <- expand.grid(
+  eta = .05,
+  max_depth = 3, 
+  min_child_weight = 3,
+  subsample = .8, 
+  colsample_bytree = 1,
+  #gamma = c(1, 100, 1000, 10000),
+  #lambda = c(1e-2, 0.1, 1, 100, 1000, 10000),
+  alpha = c(1e-2, 0.1, 1, 100, 1000, 10000), #<<
+  rmse = 0 # a place to dump results
+  )
+
+# grid search
+for(i in seq_len(nrow(hyper_grid))) {
+  set.seed(123)
+  m <- xgb.cv(
+    data = X,
+    label = Y,
+    nrounds = 6000,
+    objective = "reg:linear",
+    early_stopping_rounds = 50, 
+    nfold = 10,
+    verbose = 0,
+    params = list( 
+      eta = hyper_grid$eta[i], 
+      max_depth = hyper_grid$max_depth[i],
+      min_child_weight = hyper_grid$min_child_weight[i],
+      subsample = hyper_grid$subsample[i], #<<
+      colsample_bytree = hyper_grid$colsample_bytree[i],
+      #gamma = hyper_grid$gamma[i], 
+      #lambda = hyper_grid$lambda[i]#, 
+      alpha = hyper_grid$alpha[i] #<<
+    ) 
+  )
+  hyper_grid$rmse[i] <- min(m$evaluation_log$test_rmse_mean)
+}
+
+arrange(hyper_grid, rmse)
+
+trainv_final_xgb <- xgboost(
+  data = X,
+  label = Y,
+  nrounds = final_cv$best_iteration, #<<
+  objective = "reg:linear",
+  params = params, #<<
+  verbose = 0
+)
+```
+
+Did your model performance improve?
+Did regularization help?
+
+4. Pick your best GBM model. Which 10 features are considered most influential? Are these the same features that have been influential in previous models?
+
+```{r slide-44}
+vip::vip(ames_final_xgb, num_features = 25)
+```
+
+5. Create partial dependence plots for the top two most influential features. Explain the relationship between the feature and the predicted values.
+```{r}
+
+trainv_final_xgb %>%
+  partial(
+    pred.var = "bidder", 
+    n.trees = trainv_final_xgb$niter, 
+    grid.resolution = 50, 
+    train = X
+    ) %>%
+  autoplot(rug = TRUE, train = X)
+```
+
+
+6. Using H2O, build and assess the following individual models:
+```{r}
+h2o.init(max_mem_size = "5g")
+# make sure we have consistent categorical levels
+blueprint <- recipe(bid ~ ., data = train_v) %>%
+  step_other(all_nominal(), threshold = .005)
+
+# create training & test sets
+train_h2o <- prep(blueprint, training = train_v, retain = TRUE) %>%
+  juice() %>%
+  as.h2o()
+
+test_h2o <- prep(blueprint, training = train_v) %>%
+  bake(new_data = test_v) %>%
+  as.h2o()
+
+# get names of response and features
+Y <- "bid"
+X <- setdiff(names(train_v), Y)
+
+```
+
+
+regularized regression base learner,
+random forest base learner.
+GBM and/or XGBoost base learner.
+```{r}
+
+# Train & Cross-validate a GLM model
+best_glm <- h2o.glm(
+  x = X,
+  y = Y,
+  training_frame = train_h2o,
+  alpha = .1,
+  remove_collinear_columns = TRUE,
+  nfolds = 10, 
+  fold_assignment = "Modulo", 
+  keep_cross_validation_predictions = TRUE, 
+  seed = 123
+  )
+
+h2o.rmse(best_glm, xval = TRUE)
+
+# Train & Cross-validate a RF model
+best_rf <- h2o.randomForest(
+  x = X,
+  y = Y,
+  training_frame = train_h2o,
+  ntrees = 1000,
+  mtries = 20,
+  max_depth = 30,
+  min_rows = 1,
+  sample_rate = 0.8,
+  nfolds = 10, 
+  fold_assignment = "Modulo", 
+  keep_cross_validation_predictions = TRUE, 
+  seed = 123,
+  stopping_rounds = 50,
+  stopping_metric = "RMSE",
+  stopping_tolerance = 0
+  )
+
+h2o.rmse(best_rf, xval = TRUE)
+
+# Train & Cross-validate a GBM model
+best_gbm <- h2o.gbm(
+  x = X,
+  y = Y,
+  training_frame = train_h2o,
+  ntrees = 5000,
+  learn_rate = 0.01,
+  max_depth = 7,
+  min_rows = 5,
+  sample_rate = 0.8,
+  nfolds = 10, 
+  fold_assignment = "Modulo", 
+  keep_cross_validation_predictions = TRUE, 
+  seed = 123,
+  stopping_rounds = 50,
+  stopping_metric = "RMSE",
+  stopping_tolerance = 0
+  )
+
+h2o.rmse(best_gbm, xval = TRUE)
+
+# Train & Cross-validate an XGBoost model
+best_xgb <- h2o.xgboost(
+  x = X,
+  y = Y,
+  training_frame = train_h2o,
+  ntrees = 5000,
+  learn_rate = 0.05,
+  max_depth = 3,
+  min_rows = 3,
+  sample_rate = 0.8,
+  categorical_encoding = "Enum",
+  nfolds = 10,
+  fold_assignment = "Modulo", 
+  keep_cross_validation_predictions = TRUE, 
+  seed = 123,
+  stopping_rounds = 50,
+  stopping_metric = "RMSE",
+  stopping_tolerance = 0
+)
+
+h2o.rmse(best_xgb, xval = TRUE)
+
+```
+
+
+7. Using h2o.stackedEnsemble(), stack these three models.
+Does your stacked model performance improve over and above the individual learners?
+Explain your reasoning why or why not performance improves.
+
+8. Perform a stacked grid search with an H2O GBM or XGBoost model.
+What was your best performing model?
+Do you notice any patterns in the hyperparameter settings for the top 5-10 models?
+
+9. Perform an AutoML search across multiple types of learners.
+Which types of base learners are in the top 10?
+What model provides the optimal performance?
+Apply this model to the test set. How does the test loss function compare to the training cross-validated RMSE?
